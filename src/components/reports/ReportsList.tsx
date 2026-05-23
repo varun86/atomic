@@ -1,8 +1,9 @@
 import { memo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Telescope } from 'lucide-react';
 import { Report, ReportFindingWithAtom } from '../../stores/reports';
 import { ReportRow } from './ReportRow';
+import { ReportTemplateGallery } from './ReportTemplateGallery';
+import { ReportTemplate } from '../../lib/reportTemplates';
 
 interface ReportsListProps {
   reports: Report[];
@@ -12,6 +13,10 @@ interface ReportsListProps {
   onEdit?: (reportId: string) => void;
   onToggleEnabled?: (reportId: string, next: boolean) => void;
   onDelete?: (reportId: string) => void;
+  /// Empty-state callback. When the user has zero reports, the list
+  /// renders the template gallery inline; picks here flow back to the
+  /// parent which opens the editor with the chosen body.
+  onPickTemplate?: (template: ReportTemplate | null) => void;
 }
 
 /// Row height target. Two lines of identity (name + excerpt) + the
@@ -28,6 +33,7 @@ export const ReportsList = memo(function ReportsList({
   onEdit,
   onToggleEnabled,
   onDelete,
+  onPickTemplate,
 }: ReportsListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -56,14 +62,22 @@ export const ReportsList = memo(function ReportsList({
   }
 
   if (reports.length === 0) {
+    // Empty state: inline template gallery if the parent wired one,
+    // otherwise a passive paragraph. The parent passes onPickTemplate
+    // in the normal full-view flow; consumers like tests or future
+    // embedded use cases can omit it.
+    if (onPickTemplate) {
+      return (
+        <div className="h-full overflow-y-auto scrollbar-auto-hide">
+          <ReportTemplateGallery mode="inline" onPick={onPickTemplate} />
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col items-center justify-center h-full text-center px-8">
-        <Telescope className="w-16 h-16 text-[var(--color-border)] mb-4" strokeWidth={1.5} />
         <h3 className="text-lg font-medium text-[var(--color-text-primary)] mb-2">No reports yet</h3>
-        <p className="text-sm text-[var(--color-text-secondary)] max-w-sm">
-          Reports are scheduled research tasks that turn your atoms into recurring
-          findings. The next phase of authoring lands the create flow — for now,
-          a seeded "Daily Briefing" should appear here on first run.
+        <p className="text-sm text-[var(--color-text-secondary)] max-w-sm leading-relaxed">
+          Reports run on a schedule and produce findings that join your atoms.
         </p>
       </div>
     );

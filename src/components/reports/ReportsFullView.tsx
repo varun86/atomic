@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { Plus } from 'lucide-react';
-import { useReportsStore, Report } from '../../stores/reports';
+import { useReportsStore, Report, CreateReportInput } from '../../stores/reports';
 import { useUIStore } from '../../stores/ui';
 import { ReportsList } from './ReportsList';
 import { ReportEditorModal } from './ReportEditorModal';
+import { ReportTemplateGallery } from './ReportTemplateGallery';
 import { Modal } from '../ui/Modal';
+import { ReportTemplate } from '../../lib/reportTemplates';
 
 /// Top-level reports view, mounted by MainView when viewMode === 'reports'.
 /// Mirrors WikiFullView's shape: initialize the store once on mount,
@@ -36,10 +38,22 @@ export function ReportsFullView() {
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingReport, setEditingReport] = useState<Report | null>(null);
+  const [editorInitialBody, setEditorInitialBody] = useState<CreateReportInput | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Report | null>(null);
+  const [galleryOpen, setGalleryOpen] = useState(false);
 
+  // "New report" no longer opens a blank editor directly — it opens
+  // the template gallery, which then opens the editor with the picked
+  // template's body (or `null` for "Start blank"). Both paths share
+  // one editor surface.
   const openNewReport = () => {
+    setGalleryOpen(true);
+  };
+
+  const handleTemplatePick = (template: ReportTemplate | null) => {
+    setGalleryOpen(false);
     setEditingReport(null);
+    setEditorInitialBody(template?.body ?? null);
     setEditorOpen(true);
   };
 
@@ -47,6 +61,7 @@ export function ReportsFullView() {
     const r = reports.find(x => x.id === reportId);
     if (!r) return;
     setEditingReport(r);
+    setEditorInitialBody(null);
     setEditorOpen(true);
   };
 
@@ -104,12 +119,21 @@ export function ReportsFullView() {
         onEdit={openEdit}
         onToggleEnabled={setEnabled}
         onDelete={handleDelete}
+        onPickTemplate={handleTemplatePick}
       />
 
       <ReportEditorModal
         isOpen={editorOpen}
         report={editingReport}
+        initialBody={editorInitialBody}
         onClose={() => setEditorOpen(false)}
+      />
+
+      <ReportTemplateGallery
+        mode="modal"
+        isOpen={galleryOpen}
+        onClose={() => setGalleryOpen(false)}
+        onPick={handleTemplatePick}
       />
 
       <Modal

@@ -5,6 +5,8 @@ export { FindingRow } from './FindingRow';
 export { FeaturedStarButton } from './FeaturedStarButton';
 export { FeaturedDropdown } from './FeaturedDropdown';
 export { ReportDetailMeta } from './ReportDetailMeta';
+export { ReportTemplateGallery } from './ReportTemplateGallery';
+export { ReportTemplateCard } from './ReportTemplateCard';
 export { ReportsList } from './ReportsList';
 export { ReportRow } from './ReportRow';
 export { ScheduleStrip } from './ScheduleStrip';

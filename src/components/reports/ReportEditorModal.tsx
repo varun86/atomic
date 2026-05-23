@@ -25,6 +25,10 @@ interface ReportEditorModalProps {
   /// Switching between modes between mounts is fine — the form fully
   /// re-derives its state from `report` whenever `isOpen` toggles.
   report?: Report | null;
+  /// Pre-fill the create form with these values. Used by the template
+  /// gallery to seed name/prompt/schedule from a curated template.
+  /// Ignored when `report` is provided (edit mode wins).
+  initialBody?: CreateReportInput | null;
   onClose: () => void;
   onSaved?: (report: Report) => void;
 }
@@ -146,7 +150,29 @@ function sameWindow(a: AnyScopeWindow | null, b: AnyScopeWindow | null): boolean
   return false;
 }
 
-export function ReportEditorModal({ isOpen, report, onClose, onSaved }: ReportEditorModalProps) {
+function createInputToForm(input: CreateReportInput): FormState {
+  // Mirror reportToForm but accept the unsaved CreateReportInput shape
+  // the template gallery hands us. Fields are nearly identical to the
+  // saved Report shape; only the cache fields are absent, which is
+  // fine because the editor doesn't read those.
+  return {
+    name: input.name,
+    description: input.description ?? '',
+    research_prompt: input.research_prompt,
+    schedule: input.schedule,
+    schedule_tz: input.schedule_tz ?? null,
+    enabled: input.enabled ?? true,
+    source_tag_ids: input.source_scope_tag_ids ?? [],
+    source_window: input.source_scope_window ?? null,
+    context_mode: input.context_scope_mode ?? 'same_as_source',
+    context_tag_ids: input.context_scope_tag_ids ?? [],
+    context_window: input.context_scope_window ?? null,
+    citation_policy: input.citation_policy ?? 'source_only',
+    output_atom_tags: input.output_atom_tags ?? [],
+  };
+}
+
+export function ReportEditorModal({ isOpen, report, initialBody, onClose, onSaved }: ReportEditorModalProps) {
   const create = useReportsStore(s => s.create);
   const update = useReportsStore(s => s.update);
   const tags = useTagsStore(s => s.tags);
@@ -157,25 +183,45 @@ export function ReportEditorModal({ isOpen, report, onClose, onSaved }: ReportEd
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
-  // Re-derive form state every time the modal opens. Closing-and-
-  // reopening with no `report` is the "new" flow; closing-and-reopening
-  // with one is "edit" — either way the form resets cleanly.
+  // Re-derive form state every time the modal opens. Three modes:
+  //   - `report` set         → edit existing
+  //   - `initialBody` set    → create with template prefill
+  //   - neither              → create blank with browser tz
   useEffect(() => {
     if (!isOpen) return;
     if (report) {
       setForm(reportToForm(report));
+    } else if (initialBody) {
+      // Use the template body verbatim, but substitute the browser's
+      // tz if the template left it null so the user sees their local
+      // wall clock in the schedule preview.
+      setForm({
+        ...createInputToForm(initialBody),
+        schedule_tz: initialBody.schedule_tz ?? getBrowserTimeZone(),
+      });
     } else {
       setForm({ ...DEFAULT_FORM, schedule_tz: getBrowserTimeZone() });
     }
-    // Auto-expand advanced when editing an existing report that has
-    // non-default advanced fields — the user is here to find them.
-    setShowAdvanced(Boolean(report && (
+    // Auto-expand advanced when:
+    //   - editing a report with non-default advanced fields, OR
+    //   - prefilling from a template that customizes any advanced field
+    // (the latter is the contradiction-scan / open-questions case —
+    // users opening those should see why they're configured the way
+    // they are)
+    const hasAdvancedFromReport = Boolean(report && (
       report.source_scope_tag_ids.length > 0 ||
       report.context_scope_mode !== 'same_as_source' ||
       report.citation_policy !== 'source_only' ||
       report.output_atom_tags.length > 0
-    )));
-  }, [isOpen, report]);
+    ));
+    const hasAdvancedFromBody = Boolean(initialBody && (
+      (initialBody.source_scope_tag_ids?.length ?? 0) > 0 ||
+      (initialBody.context_scope_mode ?? 'same_as_source') !== 'same_as_source' ||
+      (initialBody.citation_policy ?? 'source_only') !== 'source_only' ||
+      (initialBody.output_atom_tags?.length ?? 0) > 0
+    ));
+    setShowAdvanced(hasAdvancedFromReport || hasAdvancedFromBody);
+  }, [isOpen, report, initialBody]);
 
   // Output-tags Tag[] derivation (TagSelector wants Tag objects).
   const outputTagObjs = useMemo<Tag[]>(() => {
