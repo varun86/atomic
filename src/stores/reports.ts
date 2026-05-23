@@ -190,6 +190,32 @@ interface ReportsStore {
   /// from `undefined` ("never fetched").
   lastFindingByReport: Record<string, ReportFindingWithAtom | null>;
 
+  /// Full findings cache, keyed by reportId. Populated by the detail
+  /// view on mount. Most-recent first; the order matches the wire
+  /// response from `list_findings_for_report`.
+  findingsByReport: Record<string, ReportFindingWithAtom[]>;
+
+  /// Lazy-loaded citation counts keyed by finding atom id. The
+  /// findings response carries the finding row + atom but not the
+  /// citation count, so the detail-view row mounts a small effect
+  /// that calls `list_finding_citations` and stashes the count here.
+  /// `undefined` = not yet fetched, number = resolved.
+  citationCountsByAtomId: Record<string, number>;
+
+  /// Reports the user has manually dispatched and whose run hasn't yet
+  /// resolved. Two things clear it: an `atom-created` event for a
+  /// kind=report atom that matches the report's new most-recent
+  /// finding (success), or a 30s poll while the detail view is open
+  /// that observes `last_error` set with `last_run_at` after dispatch
+  /// (failure). A 5-minute stale guard in the detail view clears
+  /// optimistic state if neither resolves.
+  runningReportIds: Set<string>;
+
+  /// Wall-clock dispatch timestamps per report, epoch ms. Used by the
+  /// failure poll to decide whether a stamped `last_run_at` belongs to
+  /// the run we just dispatched vs. an earlier one.
+  runDispatchedAt: Record<string, number>;
+
   isLoadingList: boolean;
   loadError: string | null;
 
@@ -206,6 +232,29 @@ interface ReportsStore {
   /// for the "open one report directly" path. Returns the report on
   /// success, `null` if the server returned 404 (report deleted).
   fetchOne: (reportId: string) => Promise<Report | null>;
+
+  /// Fetch the full findings history for a report. The detail view
+  /// mounts a single load on enter; subsequent live refreshes come
+  /// from the AtomCreated event wired in 4c-3.
+  fetchFindings: (reportId: string, limit?: number) => Promise<void>;
+
+  /// Fetch the citation count for a finding atom. Idempotent —
+  /// returns immediately if already cached. Used by FindingRow's
+  /// in-view-effect so we don't paint the whole list up front.
+  fetchCitationCount: (atomId: string) => Promise<void>;
+
+  /// Dispatch a manual run. Adds the report to `runningReportIds`,
+  /// stamps `runDispatchedAt`, fires `POST /api/reports/:id/run`. The
+  /// server responds 202 immediately; we wait for the AtomCreated
+  /// event (success) or the failure poll to clear the running state.
+  /// Throws on the dispatch itself failing (network / 404); the store
+  /// toasts on top.
+  runNow: (reportId: string) => Promise<void>;
+
+  /// Clear the running state for one report. Called by the success
+  /// detection in the AtomCreated handler, the failure detection in
+  /// the detail view's poll, and the 5-minute stale guard.
+  clearRunning: (reportId: string) => void;
 
   /// Create a new report. Returns the created `Report` so the caller
   /// (typically the editor modal) can navigate to it on success.
@@ -242,6 +291,10 @@ export const useReportsStore = create<ReportsStore>((set, get) => {
     reports: [],
     byId: {},
     lastFindingByReport: {},
+    findingsByReport: {},
+    citationCountsByAtomId: {},
+    runningReportIds: new Set<string>(),
+    runDispatchedAt: {},
     isLoadingList: false,
     loadError: null,
     hasSubscription: false,
@@ -262,18 +315,47 @@ export const useReportsStore = create<ReportsStore>((set, get) => {
         // Wire the live-refresh subscription once. The dashboard
         // BriefingWidget uses the same shape: AtomWithTags flattens, so
         // `kind` lives at the payload top level. When a report finding
-        // lands we refresh just that report's last-finding cache (and
-        // could re-fetch the row itself if we needed updated `last_run_at`;
-        // for 4a the cache update on next list refresh is sufficient).
+        // lands we:
+        //   1. Re-prime last-finding for every loaded report (the list
+        //      view's italic excerpt + the detail view's findings cache)
+        //   2. Refetch each running report's findings, then check which
+        //      report's most-recent finding matches the new atom id.
+        //      That's the run we completed — clear its running state.
         if (!get().hasSubscription) {
-          atomCreatedUnsub = getTransport().subscribe('atom-created', (payload) => {
+          atomCreatedUnsub = getTransport().subscribe('atom-created', async (payload) => {
             const p = payload as { kind?: string; id?: string } | undefined;
             if (p?.kind !== 'report') return;
-            // We don't know which report produced it from the payload
-            // alone, so re-prime last-finding for every report we know
-            // about. Cheap (one request each, no joins beyond atom tags).
-            const ids = Object.keys(get().byId);
-            ids.forEach(id => get().fetchLastFinding(id));
+            const newAtomId = p.id;
+
+            const state = get();
+            const allIds = Object.keys(state.byId);
+            const runningIds = Array.from(state.runningReportIds);
+
+            // Re-prime the list view's last-finding cache + every
+            // running report's full findings cache. Running reports
+            // are a strict subset of allIds, so we issue findings
+            // requests for them and last-finding requests for the rest.
+            const runningSet = new Set(runningIds);
+            const lastFindingPromises = allIds
+              .filter(id => !runningSet.has(id))
+              .map(id => state.fetchLastFinding(id));
+            const findingsPromises = runningIds.map(id => state.fetchFindings(id));
+            await Promise.all([...lastFindingPromises, ...findingsPromises]);
+
+            // After cache rehydration, clear any running report whose
+            // most-recent finding matches the new atom id.
+            if (newAtomId) {
+              const after = get();
+              for (const id of runningIds) {
+                const first = after.findingsByReport[id]?.[0];
+                if (first && first.atom.id === newAtomId) {
+                  get().clearRunning(id);
+                  toast.success('New finding', {
+                    description: after.byId[id]?.name,
+                  });
+                }
+              }
+            }
           });
           set({ hasSubscription: true });
         }
@@ -282,6 +364,42 @@ export const useReportsStore = create<ReportsStore>((set, get) => {
         set({ isLoadingList: false, loadError: msg });
         toast.error('Failed to load reports', { description: msg });
       }
+    },
+
+    runNow: async (reportId: string) => {
+      // Optimistically mark running before the dispatch lands, so the
+      // button disables instantly. Even if dispatch fails we revert.
+      const dispatchedAt = Date.now();
+      set(state => {
+        const next = new Set(state.runningReportIds);
+        next.add(reportId);
+        return {
+          runningReportIds: next,
+          runDispatchedAt: { ...state.runDispatchedAt, [reportId]: dispatchedAt },
+        };
+      });
+      try {
+        await getTransport().invoke('run_report_now', { report_id: reportId });
+        // 202 means "accepted, will run". The completion is observed
+        // via the AtomCreated subscription (success) or the detail
+        // view's failure poll. Nothing else to do here.
+      } catch (e) {
+        // Dispatch itself failed — revert.
+        get().clearRunning(reportId);
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error('Failed to dispatch report run', { description: msg });
+        throw e;
+      }
+    },
+
+    clearRunning: (reportId: string) => {
+      set(state => {
+        if (!state.runningReportIds.has(reportId)) return state;
+        const next = new Set(state.runningReportIds);
+        next.delete(reportId);
+        const { [reportId]: _omit, ...restDispatched } = state.runDispatchedAt;
+        return { runningReportIds: next, runDispatchedAt: restDispatched };
+      });
     },
 
     fetchOne: async (reportId: string) => {
@@ -307,6 +425,50 @@ export const useReportsStore = create<ReportsStore>((set, get) => {
         }
         toast.error('Failed to load report', { description: msg });
         return null;
+      }
+    },
+
+    fetchFindings: async (reportId: string, limit = 50) => {
+      try {
+        const results = await getTransport().invoke<FindingTuple[]>(
+          'list_findings_for_report',
+          { report_id: reportId, limit }
+        );
+        const decoded: ReportFindingWithAtom[] = results.map(([finding, atom]) => ({ finding, atom }));
+        set(state => ({
+          findingsByReport: { ...state.findingsByReport, [reportId]: decoded },
+          // Keep the list-view's last-finding cache in sync — it's a
+          // strict subset of what we just loaded.
+          lastFindingByReport: {
+            ...state.lastFindingByReport,
+            [reportId]: decoded[0] ?? null,
+          },
+        }));
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error('Failed to load findings', { description: msg });
+      }
+    },
+
+    fetchCitationCount: async (atomId: string) => {
+      // Idempotent: skip if already cached.
+      if (get().citationCountsByAtomId[atomId] !== undefined) return;
+      try {
+        const citations = await getTransport().invoke<ReportFindingCitation[]>(
+          'list_finding_citations',
+          { atom_id: atomId }
+        );
+        set(state => ({
+          citationCountsByAtomId: {
+            ...state.citationCountsByAtomId,
+            [atomId]: citations.length,
+          },
+        }));
+      } catch (e) {
+        // Soft-fail: a missing citation count just hides the badge.
+        // Don't toast — could be N concurrent failures during a
+        // mass-render and we'd flood the user.
+        console.error('[reports] fetchCitationCount failed', atomId, e);
       }
     },
 
@@ -432,6 +594,10 @@ export const useReportsStore = create<ReportsStore>((set, get) => {
         reports: [],
         byId: {},
         lastFindingByReport: {},
+        findingsByReport: {},
+        citationCountsByAtomId: {},
+        runningReportIds: new Set<string>(),
+        runDispatchedAt: {},
         isLoadingList: false,
         loadError: null,
         hasSubscription: false,

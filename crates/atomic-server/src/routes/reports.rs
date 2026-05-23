@@ -129,9 +129,30 @@ pub async fn set_report_enabled(
     ),
     tag = "reports"
 )]
-pub async fn delete_report(db: Db, path: web::Path<String>) -> HttpResponse {
-    match db.0.delete_report(&path.into_inner()).await {
-        Ok(()) => HttpResponse::NoContent().finish(),
+pub async fn delete_report(
+    db: Db,
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    // Snapshot the featured pointer before deletion so we can detect
+    // whether the delete cleared it. `delete_report` clears the pointer
+    // internally if it pointed at this report; the broadcast keeps
+    // other clients in sync.
+    let previously_featured = matches!(
+        db.0.get_featured_report_id().await,
+        Ok(Some(ref cur)) if cur == &id
+    );
+
+    match db.0.delete_report(&id).await {
+        Ok(()) => {
+            if previously_featured {
+                let _ = state
+                    .event_tx
+                    .send(ServerEvent::DashboardFeaturedChanged { report_id: None });
+            }
+            HttpResponse::NoContent().finish()
+        }
         Err(e) => error_response(e),
     }
 }

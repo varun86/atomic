@@ -1,5 +1,10 @@
 export { ReportsFullView } from './ReportsFullView';
 export { ReportDetailView } from './ReportDetailView';
+export { FindingsList } from './FindingsList';
+export { FindingRow } from './FindingRow';
+export { FeaturedStarButton } from './FeaturedStarButton';
+export { FeaturedDropdown } from './FeaturedDropdown';
+export { ReportDetailMeta } from './ReportDetailMeta';
 export { ReportsList } from './ReportsList';
 export { ReportRow } from './ReportRow';
 export { ScheduleStrip } from './ScheduleStrip';

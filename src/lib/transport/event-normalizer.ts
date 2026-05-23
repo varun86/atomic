@@ -66,6 +66,8 @@ export function normalizeServerEvent(data: Record<string, unknown>): NormalizedE
       return { event: 'server-events-lagged', payload: { skipped: data.skipped } };
     case 'BriefingReady':
       return { event: 'briefing-ready', payload: { db_id: data.db_id, briefing_id: data.briefing_id } };
+    case 'DashboardFeaturedChanged':
+      return { event: 'dashboard-featured-changed', payload: { report_id: data.report_id ?? null } };
     default:
       console.warn('Unknown server event type:', type);
       return null;

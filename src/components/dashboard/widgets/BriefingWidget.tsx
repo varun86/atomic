@@ -13,6 +13,7 @@ import {
   useFeaturedReportStore,
   type FindingCitation,
 } from '../../../stores/featuredReport';
+import { FeaturedDropdown } from '../../reports/FeaturedDropdown';
 import { getTransport } from '../../../lib/transport';
 import { formatRelativeDate } from '../../../lib/date';
 
@@ -80,13 +81,23 @@ export function BriefingWidget() {
   // so `kind` lives at the top of the payload, not under `.atom`.
   useEffect(() => {
     fetchLatest();
-    const unsub = getTransport().subscribe('atom-created', (payload) => {
+    const unsubAtomCreated = getTransport().subscribe('atom-created', (payload) => {
       const kind = (payload as { kind?: string } | undefined)?.kind;
       if (kind === 'report') {
         fetchLatest();
       }
     });
-    return () => unsub();
+    // Cross-window featured-pointer changes (this client toggling the
+    // star, another client picking a different report, a delete that
+    // cleared the pointer server-side) — refetch so the widget tracks
+    // the new featured report without polling.
+    const unsubFeatured = getTransport().subscribe('dashboard-featured-changed', () => {
+      fetchLatest();
+    });
+    return () => {
+      unsubAtomCreated();
+      unsubFeatured();
+    };
   }, [fetchLatest]);
 
   // The mini-canvas now renders only this briefing's referenced atoms (plus
@@ -178,9 +189,7 @@ export function BriefingWidget() {
             </button>
           </>
         )}
-        <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-          {eyebrowLabel}
-        </div>
+        <FeaturedDropdown label={eyebrowLabel} />
         {canRunNow && (
           <button
             onClick={() => runNow()}

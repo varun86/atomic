@@ -190,6 +190,14 @@ pub enum ServerEvent {
         atom: atomic_core::AtomWithTags,
     },
 
+    /// The per-DB `dashboard.featured_report_id` pointer changed.
+    /// Broadcast on every write through the dashboard route so the
+    /// BriefingWidget and any open detail-view star can refetch.
+    /// `report_id` is `None` when the pointer was cleared.
+    DashboardFeaturedChanged {
+        report_id: Option<String>,
+    },
+
     // Import progress events
     ImportProgress {
         current: i32,

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { toast } from 'sonner';
 import { getTransport } from '../lib/transport';
 
 // ----- Wire types (match crates/atomic-core/src/models.rs) -----
@@ -74,6 +75,11 @@ interface FeaturedReportStore {
   /// finding shows up via the atom-created event a few seconds later; we
   /// poll once after a short delay as a belt-and-suspenders fallback.
   runNow: () => Promise<void>;
+  /// Set (or clear) the dashboard's featured report. Optimistically
+  /// updates the local pointer; the server's
+  /// `dashboard-featured-changed` broadcast lands shortly after and
+  /// triggers a `fetchLatest` so the widget refreshes its history.
+  setFeatured: (reportId: string | null) => Promise<void>;
   reset: () => void;
 }
 
@@ -205,6 +211,27 @@ export const useFeaturedReportStore = create<FeaturedReportStore>(
         set({ isRunning: false });
       } catch (error) {
         set({ error: String(error), isRunning: false });
+      }
+    },
+
+    setFeatured: async (reportId: string | null) => {
+      // Optimistic local update — the widget's chevron + the detail
+      // view's star toggle should feel instant. The
+      // `dashboard-featured-changed` event lands shortly after and
+      // triggers fetchLatest to pull the new findings history.
+      const previous = get().reportId;
+      set({ reportId });
+      try {
+        await getTransport().invoke('set_featured_report_id', { report_id: reportId });
+        // Re-pull immediately so the active finding rotates without
+        // waiting for the broadcast round trip.
+        void get().fetchLatest();
+      } catch (error) {
+        // Revert + surface.
+        set({ reportId: previous, error: String(error) });
+        toast.error('Failed to update featured report', {
+          description: String(error),
+        });
       }
     },
 
