@@ -13,7 +13,7 @@ const OPTIONS: { value: CitationPolicy; label: string; helper: string }[] = [
     helper: 'Citations resolve to the atoms in this run’s source scope.',
   },
   {
-    value: 'context_citable',
+    value: 'source_and_context',
     label: 'Allow citing context atoms',
     helper: 'The agent can cite anything in the context scope, not just the source.',
   },

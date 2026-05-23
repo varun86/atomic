@@ -10,6 +10,7 @@ import {
   Report,
   CitationPolicy,
   ContextScopeMode,
+  ContextScopeWindow,
   SourceScopeWindow,
   CreateReportInput,
   UpdateReportInput,
@@ -42,7 +43,7 @@ interface FormState {
   source_window: SourceScopeWindow | null;
   context_mode: ContextScopeMode;
   context_tag_ids: string[];
-  context_window: SourceScopeWindow | null;
+  context_window: ContextScopeWindow | null;
   citation_policy: CitationPolicy;
   output_atom_tags: string[];
 }
@@ -55,7 +56,7 @@ const DEFAULT_FORM: FormState = {
   schedule_tz: null,
   enabled: true,
   source_tag_ids: [],
-  source_window: { kind: 'since_last_run' },
+  source_window: 'since_last_run',
   context_mode: 'same_as_source',
   context_tag_ids: [],
   context_window: null,
@@ -92,7 +93,11 @@ function formToCreateInput(f: FormState): CreateReportInput {
     source_scope_tag_ids: f.source_tag_ids,
     source_scope_window: f.source_window,
     context_scope_mode: f.context_mode,
-    context_scope_tag_ids: f.context_mode === 'tags' ? f.context_tag_ids : [],
+    // Tag list is only meaningful in explicit mode. The backend
+    // ignores it otherwise; we send [] to keep the payload tidy.
+    context_scope_tag_ids: f.context_mode === 'explicit' ? f.context_tag_ids : [],
+    // The same-as-source mode reuses the source window; sending null
+    // is the right shape. Other modes carry their own window.
     context_scope_window: f.context_mode === 'same_as_source' ? null : f.context_window,
     citation_policy: f.citation_policy,
     output_atom_tags: f.output_atom_tags,
@@ -113,7 +118,7 @@ function formToUpdateInput(f: FormState, original: Report): UpdateReportInput {
   if (!sameStringArr(f.source_tag_ids, original.source_scope_tag_ids)) out.source_scope_tag_ids = f.source_tag_ids;
   if (!sameWindow(f.source_window, original.source_scope_window)) out.source_scope_window = f.source_window;
   if (f.context_mode !== original.context_scope_mode) out.context_scope_mode = f.context_mode;
-  const ctxTags = f.context_mode === 'tags' ? f.context_tag_ids : [];
+  const ctxTags = f.context_mode === 'explicit' ? f.context_tag_ids : [];
   if (!sameStringArr(ctxTags, original.context_scope_tag_ids)) out.context_scope_tag_ids = ctxTags;
   const ctxWindow = f.context_mode === 'same_as_source' ? null : f.context_window;
   if (!sameWindow(ctxWindow, original.context_scope_window)) out.context_scope_window = ctxWindow;
@@ -128,12 +133,17 @@ function sameStringArr(a: string[], b: string[]): boolean {
   return true;
 }
 
-function sameWindow(a: SourceScopeWindow | null, b: SourceScopeWindow | null): boolean {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  if (a.kind !== b.kind) return false;
-  if (a.kind === 'iso_duration' && b.kind === 'iso_duration') return a.value === b.value;
-  return true;
+/// Structural equality across both window flavors. The two wire shapes
+/// are isomorphic (string variant or `{duration}` object), so one
+/// comparator handles source and context.
+type AnyScopeWindow = SourceScopeWindow | ContextScopeWindow;
+
+function sameWindow(a: AnyScopeWindow | null, b: AnyScopeWindow | null): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  if (typeof a === 'string' && typeof b === 'string') return a === b;
+  if (typeof a === 'object' && typeof b === 'object') return a.duration === b.duration;
+  return false;
 }
 
 export function ReportEditorModal({ isOpen, report, onClose, onSaved }: ReportEditorModalProps) {
@@ -303,15 +313,25 @@ export function ReportEditorModal({ isOpen, report, onClose, onSaved }: ReportEd
 
         {showAdvanced && (
           <div className="flex flex-col gap-5 pl-3 border-l border-[var(--color-border)]">
-            {/* Source scope */}
+            {/* Source scope. ScopeField's broader output union covers
+                both source and context wire shapes; for source it can
+                only emit `null | 'since_last_run' | {duration}`, all of
+                which are valid SourceScopeWindow values. Cast narrows
+                the type at the boundary. */}
             <ScopeField
               label="Source scope"
               tagIds={form.source_tag_ids}
               window={form.source_window}
-              onChange={(ids, w) => setForm(f => ({ ...f, source_tag_ids: ids, source_window: w }))}
+              onChange={(ids, w) => setForm(f => ({
+                ...f,
+                source_tag_ids: ids,
+                source_window: w as SourceScopeWindow | null,
+              }))}
             />
 
-            {/* Context scope: same-as-source / custom */}
+            {/* Context scope: same-as-source / all / explicit. The
+                backend has three variants, no `None` — "no context" is
+                expressed as `explicit` with an empty tag list. */}
             <div className="flex flex-col gap-2">
               <label className="text-xs font-medium uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
                 Context scope
@@ -338,28 +358,26 @@ export function ReportEditorModal({ isOpen, report, onClose, onSaved }: ReportEd
                 <label className="flex items-center gap-1.5 cursor-pointer">
                   <input
                     type="radio"
-                    checked={form.context_mode === 'tags'}
-                    onChange={() => setForm(f => ({ ...f, context_mode: 'tags' }))}
+                    checked={form.context_mode === 'explicit'}
+                    onChange={() => setForm(f => ({ ...f, context_mode: 'explicit' }))}
                     className="accent-[var(--color-accent)]"
                   />
-                  <span>Custom tags</span>
-                </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="radio"
-                    checked={form.context_mode === 'none'}
-                    onChange={() => setForm(f => ({ ...f, context_mode: 'none' }))}
-                    className="accent-[var(--color-accent)]"
-                  />
-                  <span>No context</span>
+                  <span>Specific tags</span>
                 </label>
               </div>
-              {form.context_mode === 'tags' && (
+              {form.context_mode === 'explicit' && (
+                /* Context scope. hideSinceLastRun=true restricts the
+                   output to `null | {duration}`, both valid
+                   ContextScopeWindow values. */
                 <ScopeField
                   label="Context tags"
                   tagIds={form.context_tag_ids}
                   window={form.context_window}
-                  onChange={(ids, w) => setForm(f => ({ ...f, context_tag_ids: ids, context_window: w }))}
+                  onChange={(ids, w) => setForm(f => ({
+                    ...f,
+                    context_tag_ids: ids,
+                    context_window: w as ContextScopeWindow | null,
+                  }))}
                   hideSinceLastRun
                 />
               )}

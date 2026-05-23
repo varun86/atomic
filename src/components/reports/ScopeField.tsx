@@ -3,7 +3,15 @@ import { TagSelector } from '../tags/TagSelector';
 import { CustomSelect } from '../ui/CustomSelect';
 import { useTagsStore } from '../../stores/tags';
 import { Tag } from '../../stores/atoms';
-import { SourceScopeWindow } from '../../stores/reports';
+import { SourceScopeWindow, ContextScopeWindow } from '../../stores/reports';
+
+/// Either-or window type covering both source and context wire shapes.
+/// Both share the `{duration}` object form; the string variants differ
+/// (`'since_last_run'` for source, `'older_than_source'` for context).
+/// The picker only emits the variants its option list exposes, so the
+/// effective output for context (when `hideSinceLastRun` is set) is
+/// always `null` or `{duration}`.
+type ScopeWindow = SourceScopeWindow | ContextScopeWindow;
 
 /// Window options exposed in the editor. The "since_last_run" sentinel
 /// is a discriminated-union variant in the API; the ISO durations get
@@ -30,10 +38,19 @@ const WINDOW_TO_ISO: Record<Exclude<WindowOption, 'since_last_run' | 'all_time'>
   last_30d: 'P30D',
 };
 
-function windowToOption(w: SourceScopeWindow | null): WindowOption {
-  if (!w) return 'all_time';
-  if (w.kind === 'since_last_run') return 'since_last_run';
-  switch (w.value) {
+/// Translate the wire-format scope window into the picker option.
+/// `null` shows as "all time" — `null` is how the backend persists "no
+/// scope limit". The `older_than_source` string variant (context-only)
+/// has no picker option in v1; if a stored report carries it we surface
+/// it as "all time" rather than rendering the picker in an unknown
+/// state. Editing that report from the modal would lose the variant —
+/// acceptable for v1 since the variant has no UI to create it yet.
+function windowToOption(w: ScopeWindow | null): WindowOption {
+  if (w === null) return 'all_time';
+  if (w === 'since_last_run') return 'since_last_run';
+  if (w === 'older_than_source') return 'all_time';
+  // Newtype variant — `Duration(String)` serializes as `{duration: "P7D"}`.
+  switch (w.duration) {
     case 'PT24H': return 'last_24h';
     case 'P7D': return 'last_7d';
     case 'P30D': return 'last_30d';
@@ -41,17 +58,17 @@ function windowToOption(w: SourceScopeWindow | null): WindowOption {
   }
 }
 
-function optionToWindow(opt: WindowOption): SourceScopeWindow | null {
+function optionToWindow(opt: WindowOption): ScopeWindow | null {
   if (opt === 'all_time') return null;
-  if (opt === 'since_last_run') return { kind: 'since_last_run' };
-  return { kind: 'iso_duration', value: WINDOW_TO_ISO[opt] };
+  if (opt === 'since_last_run') return 'since_last_run';
+  return { duration: WINDOW_TO_ISO[opt] };
 }
 
 interface ScopeFieldProps {
   label: string;
   tagIds: string[];
-  window: SourceScopeWindow | null;
-  onChange: (tagIds: string[], window: SourceScopeWindow | null) => void;
+  window: ScopeWindow | null;
+  onChange: (tagIds: string[], window: ScopeWindow | null) => void;
   /// When true, omits the "Since last run" option. The context scope
   /// makes no sense with that semantic — context is read once per run,
   /// not as a delta — and the backend rejects it on save anyway.

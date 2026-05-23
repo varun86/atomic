@@ -9,15 +9,29 @@ import { getTransport } from '../lib/transport';
 /// Discriminator on every atom; reports return findings with kind=report.
 export type AtomKind = 'captured' | 'report';
 
-export type SourceScopeWindow =
-  | { kind: 'since_last_run' }
-  | { kind: 'iso_duration'; value: string };
+/// Wire shape of `SourceScopeWindow`. The Rust enum is
+/// `#[serde(rename_all = "snake_case")]` over `{ SinceLastRun,
+/// Duration(String) }`, which externally-tagged serializes as either
+/// the bare string `"since_last_run"` or the object `{"duration":
+/// "P7D"}`. The TS shape must match exactly or the backend rejects the
+/// payload during JSON deserialization.
+export type SourceScopeWindow = 'since_last_run' | { duration: string };
 
-export type ContextScopeMode = 'all' | 'same_as_source' | 'tags' | 'none';
+/// Wire shape of `ContextScopeWindow`. Distinct enum from the source
+/// window — the contradiction-scan idiom needs `OlderThanSource` which
+/// has no source-side analog.
+export type ContextScopeWindow = 'older_than_source' | { duration: string };
 
-export type ContextScopeWindow = SourceScopeWindow;
+/// Wire-aligned `ContextScopeMode`. Backend variants are
+/// `same_as_source | all | explicit`. "Explicit" with an empty tag
+/// list is how the UI expresses "no context" — there is no `None`
+/// variant.
+export type ContextScopeMode = 'same_as_source' | 'all' | 'explicit';
 
-export type CitationPolicy = 'source_only' | 'context_citable';
+/// Wire-aligned `CitationPolicy`. Backend variants are `source_only`
+/// (citations resolve to atoms in the run's source scope) and
+/// `source_and_context` (semantic_search results also become citable).
+export type CitationPolicy = 'source_only' | 'source_and_context';
 
 /// One report definition. Matches `Report` in atomic-core. Cache fields
 /// (`last_run_at`, `last_finding_atom_id`, `last_error`) are advisory —
@@ -72,9 +86,12 @@ export interface ReportFindingCitation {
   excerpt: string;
 }
 
-/// What `list_findings_for_report` returns: each finding row joined with
-/// the standard AtomWithTags snippet. `serde(flatten)` on AtomWithTags
-/// means atom fields live at the top of `atom` (no nested `.atom`).
+/// Cleaned-up shape we cache after destructuring the
+/// `list_findings_for_report` response. The wire format is a JSON
+/// 2-tuple `[ReportFinding, AtomWithTags]` (because Rust serializes
+/// `Vec<(A, B)>` as `[[a,b], ...]`); the store decodes those tuples
+/// into this object before handing them to consumers. AtomWithTags
+/// uses `#[serde(flatten)]` so atom fields sit at the top of `atom`.
 export interface ReportFindingWithAtom {
   finding: ReportFinding;
   atom: {
@@ -87,6 +104,11 @@ export interface ReportFindingWithAtom {
     [k: string]: unknown;
   };
 }
+
+/// Raw wire shape — exactly what the server returns for
+/// `list_findings_for_report`. Kept private so consumers see the clean
+/// object form above.
+type FindingTuple = [ReportFinding, ReportFindingWithAtom['atom']];
 
 // =====================================================================
 // Write request shapes — mirror Create/UpdateReportRequest
@@ -257,11 +279,15 @@ export const useReportsStore = create<ReportsStore>((set, get) => {
 
     fetchLastFinding: async (reportId: string) => {
       try {
-        const results = await getTransport().invoke<ReportFindingWithAtom[]>(
+        const results = await getTransport().invoke<FindingTuple[]>(
           'list_findings_for_report',
           { report_id: reportId, limit: 1 }
         );
-        const first = results[0] ?? null;
+        // Server ships JSON 2-tuples (Rust `Vec<(A, B)>` semantics);
+        // destructure into the clean shape we cache.
+        const first: ReportFindingWithAtom | null = results[0]
+          ? { finding: results[0][0], atom: results[0][1] }
+          : null;
         set(state => ({
           lastFindingByReport: { ...state.lastFindingByReport, [reportId]: first },
         }));
