@@ -175,6 +175,7 @@ export const ReportRow = memo(function ReportRow({
           items={menuItems}
           position={menuPos}
           onClose={() => setMenuPos(null)}
+          autoFocus
         />
       )}
     </div>
