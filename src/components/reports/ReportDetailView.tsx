@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, Play, RefreshCw, Pencil, Trash2 } from 'lucide-react';
+import { ArrowLeft, Play, RefreshCw, Pencil, Trash2, MoreVertical } from 'lucide-react';
 import { toast } from 'sonner';
+import { ContextMenu } from '../ui/ContextMenu';
 import { useReportsStore } from '../../stores/reports';
 import { useUIStore } from '../../stores/ui';
 import { StatusBadge } from './StatusBadge';
@@ -52,6 +53,10 @@ export function ReportDetailView({ reportId }: ReportDetailViewProps) {
   const [isInitialFetch, setIsInitialFetch] = useState(!report);
   const [editorOpen, setEditorOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /// Mobile overflow menu position. `null` when closed. The menu hosts
+  /// Edit + Delete on small viewports where horizontal room for two
+  /// distinct icon buttons isn't reliable.
+  const [overflowMenuPos, setOverflowMenuPos] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (report) {
@@ -172,7 +177,12 @@ export function ReportDetailView({ reportId }: ReportDetailViewProps) {
                 {report.name}
               </h2>
               <FeaturedStarButton reportId={report.id} />
-              <StatusBadge report={report} isRunning={isRunning} />
+              {/* Status badge lives on the meta band on mobile to keep
+                  the header single-line. Desktop keeps it inline so
+                  the run-state pulse is visible next to the name. */}
+              <div className="hidden md:inline-flex">
+                <StatusBadge report={report} isRunning={isRunning} />
+              </div>
             </>
           ) : isInitialFetch ? (
             <div className="h-4 w-48 bg-[var(--color-border)] rounded animate-pulse" />
@@ -183,7 +193,11 @@ export function ReportDetailView({ reportId }: ReportDetailViewProps) {
           )}
         </div>
 
-        {/* Action cluster: Run Now (primary), Edit, Delete. */}
+        {/* Action cluster. Layout differs by viewport:
+            - md+:    Run Now · Edit · Delete (three visible buttons)
+            - <md:    Run Now · ⋮ overflow with Edit / Delete inside
+            The Run Now button has a min-width pinned so the
+            "Running…" state doesn't reflow the header. */}
         {report && (
           <div className="flex items-center gap-1.5 flex-shrink-0">
             <button
@@ -192,7 +206,8 @@ export function ReportDetailView({ reportId }: ReportDetailViewProps) {
               disabled={isRunning}
               title={isRunning ? 'Already running' : 'Run this report now'}
               className={`
-                inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium
+                inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium
+                min-w-[112px]
                 transition-colors
                 ${isRunning
                   ? 'bg-[var(--color-bg-card)] border border-[var(--color-border)] text-[var(--color-text-tertiary)] cursor-not-allowed'
@@ -213,13 +228,14 @@ export function ReportDetailView({ reportId }: ReportDetailViewProps) {
               )}
             </button>
 
+            {/* Desktop: distinct Edit + Delete icon buttons. */}
             <button
               type="button"
               onClick={() => setEditorOpen(true)}
               title="Edit report"
               aria-label="Edit report"
               className="
-                p-1.5 rounded-md text-[var(--color-text-secondary)]
+                hidden md:inline-flex p-1.5 rounded-md text-[var(--color-text-secondary)]
                 hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]
                 transition-colors
               "
@@ -233,12 +249,30 @@ export function ReportDetailView({ reportId }: ReportDetailViewProps) {
               title="Delete report"
               aria-label="Delete report"
               className="
-                p-1.5 rounded-md text-[var(--color-text-secondary)]
+                hidden md:inline-flex p-1.5 rounded-md text-[var(--color-text-secondary)]
                 hover:text-red-400 hover:bg-red-500/10
                 transition-colors
               "
             >
               <Trash2 className="w-4 h-4" strokeWidth={2} />
+            </button>
+
+            {/* Mobile: ⋮ overflow with Edit + Delete inside. */}
+            <button
+              type="button"
+              onClick={(e) => {
+                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setOverflowMenuPos({ x: rect.right - 160, y: rect.bottom + 4 });
+              }}
+              title="More actions"
+              aria-label="More actions"
+              className="
+                md:hidden p-1.5 rounded-md text-[var(--color-text-secondary)]
+                hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]
+                transition-colors
+              "
+            >
+              <MoreVertical className="w-4 h-4" strokeWidth={2} />
             </button>
           </div>
         )}
@@ -266,6 +300,29 @@ export function ReportDetailView({ reportId }: ReportDetailViewProps) {
         report={report ?? null}
         onClose={() => setEditorOpen(false)}
       />
+
+      {/* Mobile overflow menu — Edit + Delete tucked here so the
+          header stays single-line on small viewports. */}
+      {overflowMenuPos && report && (
+        <ContextMenu
+          items={[
+            {
+              label: 'Edit…',
+              icon: <Pencil className="w-3.5 h-3.5" strokeWidth={2} />,
+              onClick: () => setEditorOpen(true),
+            },
+            {
+              label: 'Delete',
+              icon: <Trash2 className="w-3.5 h-3.5" strokeWidth={2} />,
+              onClick: () => setConfirmDelete(true),
+              danger: true,
+            },
+          ]}
+          position={overflowMenuPos}
+          onClose={() => setOverflowMenuPos(null)}
+          autoFocus
+        />
+      )}
 
       {/* Delete confirm. Same copy as the list-view confirm: findings
           survive their producer by design. */}
