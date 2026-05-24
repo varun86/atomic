@@ -31,10 +31,7 @@ const DEFAULT_REPORT_DESCRIPTION: &str =
 /// the same intent as the legacy `briefing::SYSTEM_PROMPT` but phrased as
 /// a research prompt (the "what to investigate"), since the reports runner
 /// supplies its own agent-loop scaffold.
-const DEFAULT_RESEARCH_PROMPT: &str = "Synthesize the source atoms — notes the user has captured since the last briefing — into a 2-3 paragraph briefing that highlights what's noteworthy, what themes emerge, and where these new notes connect to existing knowledge. Use [N] inline citation markers to point at specific source atoms. Skip atoms that aren't noteworthy. Write in the user's voice: concise, direct, mildly analytical, no filler.";
-
-const REPORTS_PARENT_TAG: &str = "Reports";
-const BRIEFINGS_TAG: &str = "Briefings";
+const DEFAULT_RESEARCH_PROMPT: &str = "Synthesize the source atoms — notes the user has captured since the last briefing — into a 2-3 paragraph briefing that highlights what's noteworthy, what themes emerge, and where these new notes connect to existing knowledge. Skip atoms that aren't noteworthy. Write in the user's voice: concise, direct, mildly analytical, no filler.";
 
 use crate::FEATURED_REPORT_SETTING;
 
@@ -75,9 +72,11 @@ pub struct LegacyBriefingCitation {
 }
 
 /// Idempotent default-report seed. Pulls the legacy briefing schedule and
-/// prompt from the per-DB settings table, builds the equivalent reports row,
-/// stamps `Reports/Briefings`, points the dashboard at it, and clears the
-/// legacy prompt key so the report row is the new source of truth.
+/// prompt from the per-DB settings table, builds the equivalent reports
+/// row with empty `output_atom_tags` (the Reports page is the canonical
+/// surface for findings; the `kind='report'` discriminator already
+/// segregates them), points the dashboard at it, and clears the legacy
+/// prompt key so the report row is the new source of truth.
 ///
 /// Idempotency: anchored on the `reports.default_briefing_seeded` flag. The
 /// flag is set after the first successful seed; subsequent boots see it set
@@ -120,8 +119,6 @@ pub async fn seed_default_briefing_report(core: &AtomicCore) -> Result<(), Atomi
 
     let (schedule, schedule_tz, enabled) = legacy_schedule_to_cron(&settings);
 
-    let tag_id = ensure_reports_briefings_tag(core).await?;
-
     let req = CreateReportRequest {
         name: DEFAULT_REPORT_NAME.to_string(),
         description: Some(DEFAULT_REPORT_DESCRIPTION.to_string()),
@@ -140,20 +137,42 @@ pub async fn seed_default_briefing_report(core: &AtomicCore) -> Result<(), Atomi
         schedule,
         schedule_tz: Some(schedule_tz),
         enabled,
-        output_atom_tags: vec![tag_id],
+        // No system-owned tag for findings: the Reports page is the
+        // canonical surface for them, and the `kind='report'` atom
+        // discriminator already segregates them from captured atoms in
+        // every consumer (atoms grid, AtomCreated subscriptions, etc.).
+        // A `Reports/Briefings` system tag was tried earlier — see git
+        // history — but it duplicated the discriminator's work while
+        // adding a name-collision footgun against user-owned tags.
+        // User-created reports already default to empty output tags;
+        // the seeded one now matches.
+        output_atom_tags: Vec::new(),
     };
 
     let report = core.create_report(req).await?;
 
-    // Critique #1: carry the briefing's last-run timestamp onto the seeded
-    // report so the first scheduled run after collapse picks up only the
-    // atoms the briefing hadn't already covered. Without this, a busy DB
-    // would re-brief weeks of already-briefed content.
-    if let Some(last_run) = scheduler::state::get_last_run(core, "daily_briefing").await? {
-        storage
-            .update_report_cache_sync(&report.id, Some(&last_run.to_rfc3339()), None, None)
-            .await?;
-    }
+    // Carry the briefing's last-run timestamp onto the seeded report so
+    // the first scheduled run after collapse picks up only the atoms the
+    // briefing hadn't already covered. Without this, a busy DB would
+    // re-brief weeks of already-briefed content.
+    //
+    // When no legacy last-run exists (older briefing impls that didn't
+    // populate that settings key, or a DB whose briefing never fired),
+    // stamp `now()` rather than leaving the field None. The
+    // `SinceLastRun` scope resolver treats a missing `last_run_at` as
+    // "first-ever run, scope = everything since epoch"
+    // (scope.rs::resolve_source_window) — fine semantics for a freshly
+    // *created* report, dangerous for a freshly *seeded-from-history*
+    // one. Stamping `now()` says "the migration is the de-facto first
+    // run; next scheduled fire should only pick up captures from here
+    // on."
+    let last_run = scheduler::state::get_last_run(core, "daily_briefing")
+        .await?
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    storage
+        .update_report_cache_sync(&report.id, Some(&last_run), None, None)
+        .await?;
 
     storage
         .set_setting_sync(FEATURED_REPORT_SETTING, &report.id)
@@ -218,6 +237,54 @@ pub async fn migrate_briefings_to_findings(core: &AtomicCore) -> Result<usize, A
     };
 
     let rows = storage.fetch_legacy_briefings_sync().await?;
+    if !rows.is_empty() {
+        // Surface the migration upfront so a multi-second startup hang
+        // doesn't look like a frozen launch when tail-following logs.
+        // (Doesn't reach the UI yet — the HTTP listener hasn't bound.
+        // A later change to background the migration post-bind would
+        // light up a real progress indicator.)
+        tracing::info!(
+            count = rows.len(),
+            "[reports/seed] migrating legacy briefings to findings; this may take a moment",
+        );
+    }
+
+    // Pre-flight: build the set of cited atoms that still exist. A
+    // single dangling citation (cited_atom_id pointing at an atom the
+    // user has since deleted) would otherwise trip the
+    // `report_finding_citations.cited_atom_id` foreign key inside
+    // `write_finding_transactionally_sync`, aborting that row's
+    // transaction and bubbling up — which kills the entire migration
+    // and parks the legacy tables forever (the per-DB flag never gets
+    // set, so every reboot re-attempts and re-fails on the same row).
+    //
+    // Cheaper to take the hit of N point-lookups against `atoms` once
+    // up front than to risk a permanent stuck-migration on any user
+    // who has ever deleted a cited atom. Dropped citations are logged;
+    // the briefing prose itself migrates intact, just with fewer
+    // resolvable [N] markers.
+    let mut unique_cited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for row in &rows {
+        for c in &row.citations {
+            unique_cited.insert(c.atom_id.clone());
+        }
+    }
+    let mut extant_cited: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(unique_cited.len());
+    for id in &unique_cited {
+        if storage.get_atom_impl(id).await?.is_some() {
+            extant_cited.insert(id.clone());
+        }
+    }
+    let dangling_count = unique_cited.len() - extant_cited.len();
+    if dangling_count > 0 {
+        tracing::warn!(
+            dangling = dangling_count,
+            total_unique = unique_cited.len(),
+            "[reports/seed] some briefing citations reference deleted atoms; dropping",
+        );
+    }
+
     let mut written = 0usize;
     let mut skipped = 0usize;
 
@@ -256,6 +323,7 @@ pub async fn migrate_briefings_to_findings(core: &AtomicCore) -> Result<usize, A
         let citations: Vec<ReportFindingCitation> = row
             .citations
             .iter()
+            .filter(|c| extant_cited.contains(&c.atom_id))
             .map(|c| ReportFindingCitation {
                 finding_atom_id: atom_id.clone(),
                 cited_atom_id: c.atom_id.clone(),
@@ -366,30 +434,6 @@ fn legacy_schedule_to_cron(
         .unwrap_or_else(|| iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string()));
 
     (cron, tz, enabled)
-}
-
-/// Idempotently ensure `Reports` (top-level) and `Reports/Briefings` (child)
-/// exist, and return the child tag's id. Uses `create_tag` so the system
-/// can authorize a new top-level category — `get_or_create_tag` refuses to
-/// (that path is LLM-guard rail for the auto-tagger and must keep saying no
-/// to new categories invented from agent prose).
-async fn ensure_reports_briefings_tag(core: &AtomicCore) -> Result<String, AtomicCoreError> {
-    let all_tags = core.get_all_tags().await?;
-    let parent_id = match all_tags
-        .iter()
-        .find(|t| t.tag.parent_id.is_none() && t.tag.name == REPORTS_PARENT_TAG)
-    {
-        Some(t) => t.tag.id.clone(),
-        None => core.create_tag(REPORTS_PARENT_TAG, None).await?.id,
-    };
-    if let Some(existing) = all_tags
-        .iter()
-        .find(|t| t.tag.parent_id.as_deref() == Some(&parent_id) && t.tag.name == BRIEFINGS_TAG)
-    {
-        return Ok(existing.tag.id.clone());
-    }
-    let child = core.create_tag(BRIEFINGS_TAG, Some(&parent_id)).await?;
-    Ok(child.id)
 }
 
 fn parse_hh_mm(raw: &str) -> Option<(u32, u32)> {
