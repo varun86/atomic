@@ -684,6 +684,7 @@ version = "0.1.0"
 dependencies = [
  "actix-cors",
  "actix-files",
+ "actix-http",
  "actix-web",
  "actix-ws",
  "async-stream",
@@ -699,6 +700,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -707,6 +709,7 @@ dependencies = [
  "utoipa",
  "utoipa-scalar",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
