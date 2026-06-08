@@ -146,6 +146,9 @@ jobs:
             --test e2e_auth \
             --test e2e_atom_pipeline \
             --test e2e_multi_db \
+            --test e2e_websocket \
+            --test e2e_concurrent \
+            --test e2e_mcp \
             --locked \
             -- --test-threads=1
 

@@ -80,3 +80,8 @@ sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
 # helper — `actix_web::test::init_service` returns that type but actix-web
 # doesn't re-export the name.
 actix-http = "3"
+# WebSocket client for the e2e suite that asserts pipeline events arrive
+# over a real connection. tokio-tungstenite plays cleanly with the tokio
+# runtime that the rest of the test harness already runs on.
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

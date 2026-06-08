@@ -32,6 +32,8 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 use atomic_server::auth::BearerAuth;
 use atomic_server::export_jobs::ExportJobManager;
 use atomic_server::log_buffer::LogBuffer;
+use atomic_server::mcp::AtomicMcpTransport;
+use atomic_server::mcp_auth::McpAuth;
 use atomic_server::routes;
 use atomic_server::state::{AppState, SetupClaimLimiter};
 
@@ -370,6 +372,77 @@ pub async fn truncate_postgres(url: &str) {
     )
     .execute(&pool)
     .await;
+}
+
+// ==================== Real-port test server ====================
+
+/// Handle to a `HttpServer` running on an ephemeral port. Drop the handle (or
+/// call [`stop`](LiveServer::stop)) to shut it down.
+pub struct LiveServer {
+    pub base_url: String,
+    handle: actix_web::dev::ServerHandle,
+}
+
+impl LiveServer {
+    pub async fn stop(self) {
+        self.handle.stop(false).await;
+    }
+}
+
+/// Start a real `HttpServer` on `127.0.0.1:0` mirroring the production route
+/// table (`/api` scope behind `BearerAuth`, plus the public `/ws` endpoint).
+/// The returned `base_url` points at the bound port; the server runs on its
+/// own tokio task until the handle is stopped.
+///
+/// Used by the WebSocket and concurrent-storm suites that need a real TCP
+/// listener — `actix_web::test::init_service` is in-process only and can't
+/// satisfy `actix-ws`'s upgrade response or model real concurrent HTTP load.
+pub async fn spawn_live_server(ctx: &TestCtx) -> LiveServer {
+    use actix_web::{web, App, HttpServer};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let base_url = format!("http://{}", addr);
+
+    // MCP transport must be constructed once and cloned into each worker so
+    // the LocalSessionManager is shared. Mirrors the wiring in main.rs.
+    let mcp_transport = AtomicMcpTransport::new(
+        std::sync::Arc::clone(&ctx.state.manager),
+        ctx.state.event_tx.clone(),
+        Duration::from_secs(30),
+    );
+
+    let state_for_factory = ctx.state.clone();
+    let server = HttpServer::new(move || {
+        let state = state_for_factory.clone();
+        App::new()
+            .app_data(state.clone())
+            .route("/ws", web::get().to(atomic_server::ws::ws_handler))
+            .service(
+                web::scope("/mcp")
+                    .wrap(McpAuth {
+                        state: state.clone(),
+                    })
+                    .service(mcp_transport.clone().scope()),
+            )
+            .service(
+                web::scope("/api")
+                    .wrap(BearerAuth {
+                        state: state.clone(),
+                    })
+                    .configure(routes::configure_routes),
+            )
+    })
+    .workers(1)
+    .listen(listener)
+    .expect("attach listener")
+    .run();
+
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+
+    LiveServer { base_url, handle }
 }
 
 // ==================== Pipeline poller ====================
